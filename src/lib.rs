@@ -9,6 +9,7 @@
 //!
 use is_sorted::IsSorted;
 use thiserror::Error;
+pub mod ks_tests;
 
 #[derive(Error, Debug)]
 pub enum SetupError {
