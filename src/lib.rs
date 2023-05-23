@@ -24,10 +24,33 @@ pub enum SetupError {
 ///
 /// Histogram distribution used as a topping distribution for rejection scheme
 ///
-struct HistogramDistribution {
+#[derive(Debug)]
+pub struct HistogramDistribution {
     x: Vec<f64>,
     pdf: Vec<f64>,
     cdf: Vec<f64>,
+}
+
+///
+/// Search sorted grid of values and find the lower bound
+///
+/// Returns `i` such that `grid[i] <= val < grid[i + 1]`
+///
+fn search_sorted<T>(grid: &[T], val: T) -> Option<usize>
+where
+    T: PartialOrd,
+{
+    let first = grid.first().unwrap();
+    let last = grid.last().unwrap();
+
+    if !(first..last).contains(&&val) {
+        return None;
+    }
+
+    match grid.binary_search_by(|k| k.partial_cmp(&val).unwrap()) {
+        Ok(j) => Some(j),
+        Err(j) => Some(j - 1),
+    }
 }
 
 /// Calculate non-normalised cdf from a histogram probability density
@@ -54,7 +77,7 @@ fn histogram_cdf(x: &[f64], pdf: &[f64]) -> Vec<f64> {
 }
 
 impl HistogramDistribution {
-    fn new(x: Vec<f64>, pdf: Vec<f64>) -> Result<Self, SetupError> {
+    pub fn new(x: Vec<f64>, pdf: Vec<f64>) -> Result<Self, SetupError> {
         // Check preconditions
         if !IsSorted::is_sorted(&mut x.iter()) {
             return Err(SetupError::UnsortedGrid);
@@ -77,18 +100,11 @@ impl rand::distributions::Distribution<f64> for HistogramDistribution {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> f64 {
         // We know cdf is not empty
         let val = rng.gen_range(0.0..*self.cdf.last().unwrap());
-        let idx = &self.x.binary_search_by(|probe| probe.total_cmp(&val));
-
-        // We search for the index of bottom bin
-        let idx = match idx {
-            Ok(i) => *i,
-            Err(i) => *i - 1,
-        };
+        let idx = search_sorted(&self.cdf, val).unwrap();
 
         let x0 = self.x[idx];
         let p0 = self.pdf[idx];
         let c0 = self.cdf[idx];
-
         (val - c0) / p0 + x0
     }
 }
@@ -97,6 +113,7 @@ impl rand::distributions::Distribution<f64> for HistogramDistribution {
 mod tests {
     use super::*;
     use approx;
+    use rand::{Rng, SeedableRng};
 
     #[test]
     fn test_histogram_calculation() {
@@ -122,6 +139,57 @@ mod tests {
         let x = vec![-1.0, 0.5, 3.0];
         let pdf = vec![0.1, 0.2, 0.3];
         let _ = HistogramDistribution::new(x, pdf).unwrap();
+    }
+
+    #[test]
+    fn test_search_of_sorted_grid() {
+        let grid = [-0.5, 1.0, 2.0, 6.0];
+
+        // Out of range
+        assert_eq!(None, search_sorted(&grid, -0.6));
+        assert_eq!(None, search_sorted(&grid, 6.0));
+        assert_eq!(None, search_sorted(&grid, 9.0));
+
+        // In range
+        assert_eq!(Some(0), search_sorted(&grid, -0.5));
+        assert_eq!(Some(0), search_sorted(&grid, 0.0));
+
+        assert_eq!(Some(1), search_sorted(&grid, 1.0));
+        assert_eq!(Some(1), search_sorted(&grid, 1.5));
+
+        assert_eq!(Some(2), search_sorted(&grid, 5.0));
+    }
+
+    #[test]
+    fn test_histogram_pdf_sampling() {
+        let support = [-1.0, 0.5, 3.0, 4.0];
+        let pdf = [0.1, 0.2, 0.35, 0.35];
+        let cdf = [0.0, 0.15, 0.65, 1.0];
+        let n_samples = 10000;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(87674);
+
+        let dist = HistogramDistribution::new(support.into(), pdf.into()).unwrap();
+
+        let samples = (0..n_samples)
+            .map(|_| rng.sample(&dist))
+            .collect::<Vec<_>>();
+
+        let ks_res = ks_tests::ks1_test(
+            |x| {
+                let idx = search_sorted(&support, *x).unwrap();
+                let x0 = support[idx];
+                let x1 = support[idx + 1];
+                let c0 = cdf[idx];
+                let c1 = cdf[idx + 1];
+                (x - x0) / (x1 - x0) * (c1 - c0) + c0
+            },
+            samples,
+        )
+        .unwrap();
+
+        // Print the test results in case of a failure
+        println!("{:?}", ks_res);
+        assert!(ks_res.p_value() > 0.01)
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub enum TestError {
 /// # Panics
 /// If `samples` contain any pair of non -comparable values (e.g. contains a NaN for floats)
 ///
-fn ks1_compute_statistic<T>(cdf: fn(T) -> f64, samples: Vec<T>) -> f64
+fn ks1_compute_statistic<T>(cdf: impl Fn(&T) -> f64, samples: Vec<T>) -> f64
 where
     T: PartialOrd + Copy,
 {
@@ -31,7 +31,7 @@ where
 
     for (i, s) in samples.iter().enumerate() {
         let ecdf = (i + 1) as f64 / n;
-        let new_stat = (cdf(*s) - ecdf).abs();
+        let new_stat = (cdf(s) - ecdf).abs();
         if new_stat > stat {
             stat = new_stat;
         }
@@ -87,12 +87,20 @@ impl KSResult {
         let p = Self::complement_ks_cdf(arg * stat);
         Self { stat, n, p }
     }
+
+    /// Get the p-value of the test
+    ///
+    /// Probability of observing the data under the assumption that null hypothesis holds
+    /// In this case probability that that
+    pub fn p_value(&self) -> f64 {
+        self.p
+    }
 }
 
 ///
 /// Perform one sample Kolmogorov-Smirnov statistical test
 ///
-pub fn ks1_test<T>(cdf: fn(T) -> f64, samples: Vec<T>) -> Result<KSResult, TestError>
+pub fn ks1_test<T>(cdf: impl Fn(&T) -> f64, samples: Vec<T>) -> Result<KSResult, TestError>
 where
     T: PartialOrd + Copy,
 {
@@ -114,7 +122,7 @@ mod tests {
     #[test]
     fn test_ks1_statistic() {
         let samples = [0.3, 0.2, 0.25, 0.1, 0.9, 0.6];
-        let res = ks1_compute_statistic(|x| x, samples.into());
+        let res = ks1_compute_statistic(|x| *x, samples.into());
         assert_eq!(4.0 / 6.0 - 0.3, res);
     }
 
@@ -122,14 +130,14 @@ mod tests {
     #[should_panic]
     fn test_ks1_noncomparable() {
         let samples = [0.3, 0.2, 0.25, 0.1, 0.9, f64::NAN];
-        let _ = ks1_compute_statistic(|x| x, samples.into());
+        let _ = ks1_compute_statistic(|x| *x, samples.into());
     }
 
     #[test]
     fn test_ks1_test() {
         let samples = [0.3, 0.2, 0.25, 0.1, 0.9, 0.6];
         let lhs = KSResult::new(4.0 / 6.0 - 0.3, 6);
-        let rhs = ks1_test(|x| x, samples.into()).unwrap();
+        let rhs = ks1_test(|x| *x, samples.into()).unwrap();
         assert_eq!(lhs, rhs);
     }
 
@@ -137,7 +145,7 @@ mod tests {
     fn test_ks1_error() {
         let samples = [0.3, 0.2, 0.25, 0.1, 0.9, 0.6, f64::NAN];
         assert!(
-            ks1_test(|x| x, samples.into()).is_err(),
+            ks1_test(|x| *x, samples.into()).is_err(),
             "Failed to detect nan in the list"
         )
     }
