@@ -7,8 +7,11 @@
 //! Kolmogorov-Smirnov test to test correctness of more efficient sampling
 //! algorithms.
 //!
+use argmin::core::CostFunction;
 use is_sorted::IsSorted;
+use std::ops::Range;
 use thiserror::Error;
+
 pub mod ks_tests;
 
 #[derive(Error, Debug)]
@@ -19,6 +22,8 @@ pub enum SetupError {
     NegativePdf,
     #[error("Lengths of arrays to form a table are different")]
     LengthMismatch,
+    #[error("Optimisation with argmin has failed")]
+    OptimisationError(#[from] argmin::core::Error),
 }
 
 ///
@@ -106,6 +111,95 @@ impl rand::distributions::Distribution<f64> for HistogramDistribution {
         let p0 = self.pdf[idx];
         let c0 = self.cdf[idx];
         (val - c0) / p0 + x0
+    }
+}
+
+///
+/// Wrapper around an objective function to maximise for to interface with argmin library
+///
+pub struct FlipSign<T: Fn(f64) -> f64> {
+    pub function: T,
+}
+
+impl<T> CostFunction for FlipSign<T>
+where
+    T: Fn(f64) -> f64,
+{
+    type Param = f64;
+    type Output = f64;
+
+    fn cost(&self, param: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
+        Ok(-(self.function)(*param))
+    }
+}
+
+///
+/// Creates linearly spaced grid between `start` and `end` of size `n`
+///
+/// # Panics
+/// If number of points is 0 or 1
+///
+pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
+    if n < 2 {
+        panic! {"Grid cannot have {n} values. At least 2 are required."}
+    }
+
+    let delta = (end - start) / (n - 1) as f64;
+    (0..n).map(|i| start + delta * i as f64).collect()
+}
+
+/// Draws samples from a distribution described by a shape-function
+///
+/// The distribution is one-dimensional and its support must be an interval
+///
+pub struct FunctionSampler<T: Fn(f64) -> f64> {
+    function: T,
+    hist: HistogramDistribution,
+    range: Range<f64>
+}
+
+impl<T> FunctionSampler<T>
+where
+    T: Fn(f64) -> f64,
+{
+    ///
+    /// Find the maximum of the function in the interval
+    ///
+    fn maximise(function: &T, start: f64, end: f64) -> Result<f64, SetupError> {
+        let problem = FlipSign { function };
+        let solver = argmin::solver::brent::BrentOpt::new(start, end);
+        let res = argmin::core::Executor::new(problem, solver).run()?;
+
+        Ok(-res.state().cost)
+    }
+
+    /// Build new rejection-based sampler from a pdf shape
+    ///
+    ///
+    pub fn new(function: T, range: Range<f64>, bins: usize) -> Result<Self, SetupError> {
+        // Set Safety factor
+        const FACTOR: f64 = 1.05;
+
+        // Create subdivision grid
+        let grid = linspace(range.start, range.end, bins);
+
+        // Get maxima in each window
+        // We need the vector of maxima to match
+        let mut maxima = grid
+            .windows(2)
+            .map(|x| Self::maximise(&function, x[0], x[1]).map(|x| FACTOR * x))
+            .collect::<Result<Vec<f64>, SetupError>>()?;
+        maxima.push(*maxima.last().unwrap());
+
+        // Construct topping distribution
+        let hist = HistogramDistribution::new(grid, maxima)?;
+
+        // Profit
+        Ok(Self{function, hist, range})
+    }
+
+    pub fn get(&self, x: f64) -> f64 {
+        (self.function)(x)
     }
 }
 
