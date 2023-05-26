@@ -24,6 +24,10 @@ pub enum SetupError {
     LengthMismatch,
     #[error("Optimisation with argmin has failed")]
     OptimisationError(#[from] argmin::core::Error),
+    #[error("Insufficient number of bins: {0}, must have at least {1}")]
+    InsufficientBins(usize, usize),
+    #[error("Got empty range where non-empty is required")]
+    EmptyRange,
 }
 
 ///
@@ -83,7 +87,6 @@ fn histogram_cdf(x: &[f64], pdf: &[f64]) -> Vec<f64> {
 
 impl HistogramDistribution {
     pub fn new(x: Vec<f64>, pdf: Vec<f64>) -> Result<Self, SetupError> {
-        // Check preconditions
         if !IsSorted::is_sorted(&mut x.iter()) {
             return Err(SetupError::UnsortedGrid);
         } else if pdf.iter().any(|v| *v < 0.0) {
@@ -92,9 +95,27 @@ impl HistogramDistribution {
             return Err(SetupError::LengthMismatch);
         }
 
-        // Calculate CDF and return
         let cdf = histogram_cdf(&x, &pdf);
         Ok(Self { x, pdf, cdf })
+    }
+
+    /// Sample a value from the histogram and return the value of non-normalised probability
+    ///
+    /// # Result
+    /// Tuple `(s, p)` where `s` is the sample and `p` probability in the bin
+    ///
+    pub fn sample_with_value<RNG>(&self, rng: &mut RNG) -> (f64, f64)
+    where
+        RNG: rand::Rng + ?Sized,
+    {
+        // We know cdf is not empty
+        let val = rng.gen_range(0.0..*self.cdf.last().unwrap());
+        let idx = search_sorted(&self.cdf, val).unwrap();
+
+        let x0 = self.x[idx];
+        let p0 = self.pdf[idx];
+        let c0 = self.cdf[idx];
+        ((val - c0) / p0 + x0, p0)
     }
 }
 
@@ -103,14 +124,7 @@ impl HistogramDistribution {
 ///
 impl rand::distributions::Distribution<f64> for HistogramDistribution {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> f64 {
-        // We know cdf is not empty
-        let val = rng.gen_range(0.0..*self.cdf.last().unwrap());
-        let idx = search_sorted(&self.cdf, val).unwrap();
-
-        let x0 = self.x[idx];
-        let p0 = self.pdf[idx];
-        let c0 = self.cdf[idx];
-        (val - c0) / p0 + x0
+        self.sample_with_value(rng).0
     }
 }
 
@@ -154,8 +168,7 @@ pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
 ///
 pub struct FunctionSampler<T: Fn(f64) -> f64> {
     function: T,
-    hist: HistogramDistribution,
-    range: Range<f64>
+    pub hist: HistogramDistribution,
 }
 
 impl<T> FunctionSampler<T>
@@ -180,8 +193,14 @@ where
         // Set Safety factor
         const FACTOR: f64 = 1.05;
 
+        if bins == 0 {
+            return Err(SetupError::InsufficientBins(bins, 1));
+        } else if range.is_empty() {
+            return Err(SetupError::EmptyRange);
+        }
+
         // Create subdivision grid
-        let grid = linspace(range.start, range.end, bins);
+        let grid = linspace(range.start, range.end, bins + 1);
 
         // Get maxima in each window
         // We need the vector of maxima to match
@@ -195,11 +214,36 @@ where
         let hist = HistogramDistribution::new(grid, maxima)?;
 
         // Profit
-        Ok(Self{function, hist, range})
+        Ok(Self { function, hist })
     }
+}
 
-    pub fn get(&self, x: f64) -> f64 {
-        (self.function)(x)
+/// Draws samples from the FunctionSampler
+///
+/// # Panics
+/// Sampling may panic if the shape function has  negative values or upper bound
+/// is not is not fulfilled. This may happen if gradient of the shape function
+/// is strong and the safety factor on the tolerance of optimisation was
+/// insufficient
+///
+impl<T> rand::distributions::Distribution<f64> for FunctionSampler<T>
+where
+    T: Fn(f64) -> f64,
+{
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> f64 {
+        // Draw sample from the histogram
+        loop {
+            let (sample, p_top) = self.hist.sample_with_value(rng);
+            let p_val = (self.function)(sample);
+            if p_top < p_val {
+                panic!("Upper bound {p_top} is lower than {p_val} at {sample}");
+            } else if p_val < 0.0 {
+                panic!("Negative value {p_val} at {sample}")
+            }
+            if p_val / p_top > rng.gen() {
+                return sample;
+            }
+        }
     }
 }
 
@@ -303,5 +347,49 @@ mod tests {
             HistogramDistribution::new(x.clone(), vec![0.1, 0.3]).is_err(),
             "Failed to detect length mistmatch"
         );
+    }
+
+    #[test]
+    fn test_function_sampler_sampling() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(87674);
+        let dist = FunctionSampler::new(|x| -x * x + x, 0.0..1.0, 30).unwrap();
+        let n_samples = 10000;
+
+        let samples = (0..n_samples)
+            .map(|_| rng.sample(&dist))
+            .collect::<Vec<_>>();
+
+        let ks_res = ks_tests::ks1_test(|x| 3.0 * x * x - 2.0 * x * x * x, samples).unwrap();
+        // Print the test results in case of a failure
+        println!("{:?}", ks_res);
+        assert!(ks_res.p_value() > 0.01)
+    }
+
+    #[test]
+    fn test_function_sampler_setup_errors() {
+        assert!(
+            FunctionSampler::new(|x| -x * x + x, 1.0..0.0, 30).is_err(),
+            "Failed to detect empty range"
+        );
+        assert!(
+            FunctionSampler::new(|x| -x * x + x, 0.0..1.0, 0).is_err(),
+            "Failed to detect insufficient number of bins"
+        );
+        assert!(
+            FunctionSampler::new(|x| -x * x + x - 0.2, 0.0..1.0, 30).is_err(),
+            "Failed to detect negative maxima in thr bins"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_function_sampler_negative_pdf() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(87674);
+
+        // We select only single bin so that negative pdf is hidden from the histogram
+        let dist = FunctionSampler::new(|x| -x * x + x - 0.1, 0.0..1.0, 1).unwrap();
+
+        // Will panic on sampling
+        let _samples = (0..100).map(|_| rng.sample(&dist)).collect::<Vec<_>>();
     }
 }
