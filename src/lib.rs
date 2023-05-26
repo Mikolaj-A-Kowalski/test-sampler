@@ -14,24 +14,39 @@ use thiserror::Error;
 
 pub mod ks_tests;
 
+/// Error raised when the setup of a sampling distribution has failed
+///
 #[derive(Error, Debug)]
 pub enum SetupError {
+    /// Grid for tabulated values si not sorted
     #[error("Values in a grid are not sorted")]
     UnsortedGrid,
+    /// Negative entries were found in probability density function (pdf)
     #[error("Negative values present in probability density function")]
     NegativePdf,
+    /// Length of vectors that form a table is not the same
     #[error("Lengths of arrays to form a table are different")]
     LengthMismatch,
+    /// Wraps errors from failed optimisation by [argmin]
     #[error("Optimisation with argmin has failed")]
     OptimisationError(#[from] argmin::core::Error),
+    /// Number of bins to construct the tabulated data (`0`) is lower then required  (`1`)
     #[error("Insufficient number of bins: {0}, must have at least {1}")]
     InsufficientBins(usize, usize),
+    /// Was given empty range to represent a mon-empty interval
     #[error("Got empty range where non-empty is required")]
     EmptyRange,
 }
 
+/// Distribution described by non-normalised histogram
 ///
-/// Histogram distribution used as a topping distribution for rejection scheme
+/// The distribution is given as a table of `x` and `pdf` which follows histogram
+/// interpolation. For `x ∈ [xᵢ₊₁; xᵢ]` probability if `pdf(x) = pdfᵢ`. The
+/// cumulative distribution function becomes piece-wise linear which makes
+/// sampling form the table quite easy.
+///
+/// To support better approximation of different pdfs, the grid is not
+/// equal-spaced in general. Hence binary search is needed to find correct bin.
 ///
 #[derive(Debug)]
 pub struct HistogramDistribution {
@@ -44,6 +59,8 @@ pub struct HistogramDistribution {
 /// Search sorted grid of values and find the lower bound
 ///
 /// Returns `i` such that `grid[i] <= val < grid[i + 1]`
+///
+/// Local function required to search the [HistogramDistribution]
 ///
 fn search_sorted<T>(grid: &[T], val: T) -> Option<usize>
 where
@@ -86,6 +103,13 @@ fn histogram_cdf(x: &[f64], pdf: &[f64]) -> Vec<f64> {
 }
 
 impl HistogramDistribution {
+    /// Create a new instance of the histogram distribution
+    ///
+    /// The cumulative distribution function will be calculated.
+    ///
+    /// Condition `x.len() == pdf.len() > 1`, must be met.
+    /// Thus the last value in the `pdf` vector will be ignored.
+    ///
     pub fn new(x: Vec<f64>, pdf: Vec<f64>) -> Result<Self, SetupError> {
         if !IsSorted::is_sorted(&mut x.iter()) {
             return Err(SetupError::UnsortedGrid);
@@ -93,6 +117,8 @@ impl HistogramDistribution {
             return Err(SetupError::NegativePdf);
         } else if x.len() != pdf.len() {
             return Err(SetupError::LengthMismatch);
+        } else if x.len() <= 1 {
+            return Err(SetupError::InsufficientBins(x.len(), 2));
         }
 
         let cdf = histogram_cdf(&x, &pdf);
@@ -103,6 +129,9 @@ impl HistogramDistribution {
     ///
     /// # Result
     /// Tuple `(s, p)` where `s` is the sample and `p` probability in the bin
+    ///
+    /// We need a way to sample while returning probability value in the bin as well
+    /// to implement rejection sampling scheme without repeating a binary search of the grid.
     ///
     pub fn sample_with_value<RNG>(&self, rng: &mut RNG) -> (f64, f64)
     where
@@ -129,9 +158,15 @@ impl rand::distributions::Distribution<f64> for HistogramDistribution {
 }
 
 ///
-/// Wrapper around an objective function to maximise for to interface with argmin library
+/// Wrap a function to maximise
 ///
-pub struct FlipSign<T: Fn(f64) -> f64> {
+/// We need a separate struct to use [argmin] library, because we need to implement
+/// some Traits to use it as optimisation problem with other `argmin` components.
+///
+/// Since by convention, objective are minimised, we also need to take the
+/// negative of `function` as the cost.
+///
+struct FlipSign<T: Fn(f64) -> f64> {
     pub function: T,
 }
 
@@ -150,8 +185,15 @@ where
 ///
 /// Creates linearly spaced grid between `start` and `end` of size `n`
 ///
+/// ```
+/// # use universal_sampler::linspace;
+/// assert_eq!(vec![1.0, 2.0, 3.0], linspace(1.0, 3.0, 3));
+/// assert_eq!(vec![3.0, 2.0, 1.0], linspace(3.0, 1.0, 3));
+/// assert_eq!(vec![3.0, 3.0, 3.0], linspace(3.0, 3.0, 3));
+/// ```
+///
 /// # Panics
-/// If number of points is 0 or 1
+/// If number of points `n` is 0 or 1
 ///
 pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
     if n < 2 {
@@ -162,21 +204,61 @@ pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
     (0..n).map(|i| start + delta * i as f64).collect()
 }
 
-/// Draws samples from a distribution described by a shape-function
+/// Distribution described by a non-negative shape function on an interval
 ///
-/// The distribution is one-dimensional and its support must be an interval
+/// Allows sampling from a generic distribution described by some shape function `f`.
+/// The function does not need to be normalised i.e. `∫f(s)ds ≠ 1.0` in general
+///
+/// It is intended to be used as a reference distribution for verification of
+/// more efficient sampling algorithms.
+///
+/// # Sampling procedure
+///
+/// To generate the samples a relatively expensive setup step is required. The user
+/// provides an interval `[x₀, x₁]` which is a support of the shape function `f`.
+/// The support is then subdivided into number of bins. In each a local maximum
+/// is found by numerical means. This allows to create a histogram approximation
+/// of the probability distribution, that 'tops' the actual distribution. Hence,
+/// we may draw samples from the histogram and use rejection scheme to obtain
+/// the distribution described by `f`.
+///
+/// Since the numerical maximisation is associated with some tolerance, a safety
+/// factor of 5% is applied on the local maxima to ensure that the supremum criterion
+/// required for rejection sampling is met.
+///
+/// Note that for very sharp functions (large `df/dx`) the safety factor may be
+/// insufficient. Also a general check if `f(x) ≥ 0 ∀ x∈[x₀, x₁]` is met is
+/// not feasible. Hence sampling may **panic** if either of the conditions occurs.
+///
+/// # Usage
+///
+/// The distribution is integrated with [rand] package and can be used to construct
+/// a sampling iterator as follows:
+/// ```
+/// # use universal_sampler::FunctionSampler;
+/// use rand::{self, Rng};
+///
+/// # fn main() -> Result<(), universal_sampler::SetupError> {
+/// let dist = FunctionSampler::new(|x| -x*x + x, 0.0..1.0, 30)?;
+/// let samples = rand::thread_rng().sample_iter(&dist).take(10);
+/// # Ok(())
+/// # }
+/// ```
 ///
 pub struct FunctionSampler<T: Fn(f64) -> f64> {
     function: T,
-    pub hist: HistogramDistribution,
+    hist: HistogramDistribution,
 }
 
 impl<T> FunctionSampler<T>
 where
     T: Fn(f64) -> f64,
 {
-    ///
-    /// Find the maximum of the function in the interval
+    /// Safety factor to increase bin maxima to protect against error due
+    /// to tolerance of numerical optimisation
+    pub const SAFETY_FACTOR: f64 = 1.05;
+
+    /// Helper function to find maximum in a given bin
     ///
     fn maximise(function: &T, start: f64, end: f64) -> Result<f64, SetupError> {
         let problem = FlipSign { function };
@@ -186,13 +268,14 @@ where
         Ok(-res.state().cost)
     }
 
-    /// Build new rejection-based sampler from a pdf shape
+    /// New sampler from components
     ///
+    /// # Arguments
+    /// - `function` - A function `Fn(f64) -> f64` that is non-negative on `range`
+    /// - `range` - Support of the probability distribution with the shape of `function`
+    /// - `bins` - Number of bins to construct topping histogram (at least 1)
     ///
     pub fn new(function: T, range: Range<f64>, bins: usize) -> Result<Self, SetupError> {
-        // Set Safety factor
-        const FACTOR: f64 = 1.05;
-
         if bins == 0 {
             return Err(SetupError::InsufficientBins(bins, 1));
         } else if range.is_empty() {
@@ -206,7 +289,7 @@ where
         // We need the vector of maxima to match
         let mut maxima = grid
             .windows(2)
-            .map(|x| Self::maximise(&function, x[0], x[1]).map(|x| FACTOR * x))
+            .map(|x| Self::maximise(&function, x[0], x[1]).map(|x| Self::SAFETY_FACTOR * x))
             .collect::<Result<Vec<f64>, SetupError>>()?;
         maxima.push(*maxima.last().unwrap());
 
@@ -346,6 +429,10 @@ mod tests {
         assert!(
             HistogramDistribution::new(x.clone(), vec![0.1, 0.3]).is_err(),
             "Failed to detect length mistmatch"
+        );
+        assert!(
+            HistogramDistribution::new(vec![0.1], vec![0.1]).is_err(),
+            "Failed to detect too short vectors"
         );
     }
 
