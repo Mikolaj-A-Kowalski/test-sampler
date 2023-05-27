@@ -1,6 +1,7 @@
 //! Provides One- and Two-Sample Kolmogorov-Smirnov test implementation
 //!
 use std::f64::consts::PI;
+use std::iter::Iterator;
 use thiserror::Error;
 
 ///
@@ -11,6 +12,94 @@ pub enum TestError {
     /// present in the order sequence (e.g. NaN in floats)
     #[error("Collection contains values that cannot be placed in an order sequence (e.g. NaNfor floats)")]
     ContainsNotSortableValues,
+}
+
+///
+///
+///
+#[derive(Debug, Clone)]
+pub struct Ecdf<T>
+where
+    T: PartialOrd + Copy,
+{
+    samples: Vec<T>,
+}
+
+impl<T> Ecdf<T>
+where
+    T: PartialOrd + Copy,
+{
+    pub fn new(mut samples: Vec<T>) -> Result<Self, TestError> {
+        if !all_comparable(&samples) {
+            return Err(TestError::ContainsNotSortableValues);
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).expect("Not comparable values in the grid"));
+        Ok(Self { samples })
+    }
+}
+
+///
+///
+///
+pub struct EcdfInterator<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    ecdf: &'a Ecdf<T>,
+    idx: usize,
+    n: usize,
+}
+
+impl<'a, T> EcdfInterator<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    fn new(ecdf: &'a Ecdf<T>) -> Self {
+        Self {
+            ecdf,
+            idx: 0,
+            n: ecdf.samples.len(),
+        }
+    }
+}
+
+impl<'a, T> Iterator for EcdfInterator<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    type Item = (f64, T);
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(x) = self.ecdf.samples.get(self.idx) {
+            self.idx += 1;
+            Some((self.idx as f64 / self.n as f64, *x))
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Ecdf<T>
+where
+    T: PartialOrd + Copy,
+{
+    type Item = (f64, T);
+    type IntoIter = EcdfInterator<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Self::IntoIter::new(self)
+    }
+}
+
+///
+/// Check that all elements in the grid are in the partial order
+///
+/// Note that e.g. f64 may contain NaNs which are not comparable to other numbers.
+///
+fn all_comparable<T>(grid: &[T]) -> bool
+where
+    T: PartialOrd,
+{
+    return grid.windows(2).all(|x| x[0].partial_cmp(&x[1]).is_some());
 }
 
 ///
@@ -105,10 +194,7 @@ where
     T: PartialOrd + Copy,
 {
     let n = samples.len();
-    if samples
-        .windows(2)
-        .any(|x| x[0].partial_cmp(&x[1]).is_none())
-    {
+    if !all_comparable(&samples) {
         return Err(TestError::ContainsNotSortableValues);
     }
     let stat = ks1_compute_statistic(cdf, samples);
