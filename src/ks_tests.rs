@@ -1,7 +1,7 @@
 //! Provides One- and Two-Sample Kolmogorov-Smirnov test implementation
 //!
 use std::f64::consts::PI;
-use std::iter::Iterator;
+use std::iter::{Iterator, Peekable};
 use thiserror::Error;
 
 ///
@@ -54,6 +54,13 @@ where
         }
         samples.sort_by(|a, b| a.partial_cmp(b).expect("Not comparable values in the grid"));
         Ok(Self { samples })
+    }
+
+    /// Get the value of ecdf at `val`
+    ///
+    pub fn get(&self, val: T) -> f64 {
+        let idx = self.samples.partition_point(|x| *x <= val);
+        idx as f64 / self.samples.len() as f64
     }
 }
 
@@ -127,7 +134,7 @@ where
 pub struct KSResult {
     stat: f64,
     p: f64,
-    n: usize,
+    n: f64,
 }
 
 impl KSResult {
@@ -165,8 +172,8 @@ impl KSResult {
     /// - `stat` - Value of the test statistic
     /// - `n` - effective sample size
     ///
-    fn new(stat: f64, n: usize) -> Self {
-        let sqrt_n = f64::sqrt(n as f64);
+    fn new(stat: f64, n: f64) -> Self {
+        let sqrt_n = f64::sqrt(n);
         let arg = sqrt_n + 0.12 + 0.11 / sqrt_n;
         let p = Self::complement_ks_cdf(arg * stat);
         Self { stat, n, p }
@@ -200,7 +207,141 @@ where
         }
     }
 
-    Ok(KSResult::new(stat, n))
+    Ok(KSResult::new(stat, n as f64))
+}
+
+///
+/// Builds a Brownian bridge of two [Ecdf]s
+///
+/// The `top` ecdf gives positive contributions, `bottom` negative.
+/// We iterate through both sorted sets of samples in-order and depending
+/// whether a sample from the `top` or `bottom` ecdf was taken we nudge the
+/// sum up or down respectively.
+///
+/// We skip over the repeated values. Thus for samples:
+///   [1, 2, 2, 3]
+///   [2]
+/// We get the sequence:
+///   [0.25, -0.25, 0.0]
+///
+struct EcdfBridge<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    top: Peekable<std::slice::Iter<'a, T>>,
+    bottom: Peekable<std::slice::Iter<'a, T>>,
+    delta_top: f64,
+    delta_bottom: f64,
+    sum: f64,
+}
+
+impl<'a, T> EcdfBridge<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    pub fn new(ecdf_top: &'a Ecdf<T>, ecdf_bottom: &'a Ecdf<T>) -> Self {
+        Self {
+            top: ecdf_top.samples.iter().peekable(),
+            bottom: ecdf_bottom.samples.iter().peekable(),
+            delta_top: 1.0 / ecdf_top.samples.len() as f64,
+            delta_bottom: 1.0 / ecdf_bottom.samples.len() as f64,
+            sum: 0.0,
+        }
+    }
+
+    /// Advance the top ecdf
+    ///
+    /// Needs to loop over repeated values.
+    ///
+    /// # Panics
+    /// If it is called when `top` is already empty
+    ///
+    fn advance_top(&mut self) -> f64 {
+        loop {
+            let v = self.top.next().unwrap();
+            self.sum += self.delta_top;
+
+            let next = self.top.peek();
+
+            if next.is_none() || *next.unwrap() != v {
+                break;
+            }
+        }
+        self.sum
+    }
+
+    /// Advance the bottom ecdf
+    ///
+    /// Needs to loop over repeated values.
+    ///
+    /// # Panics
+    /// If it is called when `bottom` is already empty
+    ///
+    fn advance_bottom(&mut self) -> f64 {
+        loop {
+            let v = self.bottom.next().unwrap();
+            self.sum -= self.delta_bottom;
+
+            let next = self.bottom.peek();
+
+            if next.is_none() || *next.unwrap() != v {
+                break;
+            }
+        }
+        self.sum
+    }
+}
+
+impl<'a, T> Iterator for EcdfBridge<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let top = self.top.peek();
+        let bottom = self.bottom.peek();
+
+        match (top, bottom) {
+            (Some(t), Some(b)) => {
+                if t < b {
+                    Some(self.advance_top())
+                } else if t == b {
+                    // We need to be careful if same element is present in both `top` and `bottom`.
+                    // In that case we need to advance both iterators
+                    self.advance_top();
+                    Some(self.advance_bottom())
+                } else {
+                    Some(self.advance_bottom())
+                }
+            }
+            (None, Some(_)) => Some(self.advance_bottom()),
+            (Some(_), None) => Some(self.advance_top()),
+            (None, None) => None,
+        }
+    }
+}
+
+///
+/// Preform 2-sample Kolmogorov-Smirnov test
+///
+pub fn ks2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<KSResult, TestError>
+where
+    T: PartialOrd + Copy,
+{
+    let n1 = sample1.len() as f64;
+    let n2 = sample2.len() as f64;
+
+    let ecdf1 = Ecdf::new(sample1)?;
+    let ecdf2 = Ecdf::new(sample2)?;
+
+    // Compute statistic
+    let stat = EcdfBridge::new(&ecdf1, &ecdf2)
+        .map(|v| v.abs())
+        .max_by(|a, b| a.partial_cmp(b).expect("PartialOrd comparison failed"))
+        .expect("Empty iterator?!");
+
+    Ok(KSResult::new(stat, n1 * n2 / (n1 + n2)))
 }
 
 #[cfg(test)]
@@ -208,9 +349,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_ecdf() {
+        let samples = [0.3, 0.1, 0.5, 0.7];
+        let ecdf = Ecdf::new(samples.into()).unwrap();
+
+        assert_eq!(0.0, ecdf.get(-2.0));
+
+        assert_eq!(0.25, ecdf.get(0.1));
+        assert_eq!(0.25, ecdf.get(0.2));
+
+        assert_eq!(0.75, ecdf.get(0.5));
+        assert_eq!(0.75, ecdf.get(0.6));
+
+        assert_eq!(1.0, ecdf.get(0.7));
+        assert_eq!(1.0, ecdf.get(0.71));
+    }
+
+    #[test]
     fn test_ks1_test() {
         let samples = [0.3, 0.2, 0.25, 0.1, 0.9, 0.6];
-        let lhs = KSResult::new(4.0 / 6.0 - 0.3, 6);
+        let lhs = KSResult::new(4.0 / 6.0 - 0.3, 6.0);
         let rhs = ks1_test(|x| *x, samples.into()).unwrap();
         assert_eq!(lhs, rhs);
     }
@@ -222,6 +380,46 @@ mod tests {
             ks1_test(|x| *x, samples.into()).is_err(),
             "Failed to detect nan in the list"
         )
+    }
+
+    #[test]
+    fn test_ks2_test() {
+        let samples1 = [0.3, 0.2, 0.25, 0.1, 0.9, 0.6];
+        let samples2 = [0.1, 0.8, 0.34, 0.09, 0.12, 0.81];
+
+        let rhs = ks2_test(samples1.into(), samples2.into()).unwrap();
+        let lhs = KSResult::new(1.0 / 3.0, 3.0);
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn test_ks2_test_repeated_samples() {
+        let samples1 = [1, 2, 2, 3];
+        let samples2 = [2];
+
+        let rhs = ks2_test(samples1.into(), samples2.into()).unwrap();
+        let lhs = KSResult::new(0.25, 0.8);
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn test_ecdf_bridge() {
+        let cases = [
+            (vec![1, 2, 2, 3], vec![2], vec![0.25, -0.25, 0.0]),
+            (vec![2], vec![1, 2, 2, 3], vec![-0.25, 0.25, 0.0]),
+            (vec![1, 2, 2, 3], vec![1, 2, 2, 3], vec![0.0, 0.0, 0.0]),
+            (vec![1, 2, 3, 4], vec![3, 3], vec![0.25, 0.5, -0.25, 0.0]),
+            (vec![2], vec![1, 2, 2, 2], vec![-0.25, 0.0]),
+        ];
+
+        for (s1, s2, reference) in cases {
+            let ecdf1 = Ecdf::new(s1).unwrap();
+            let ecdf2 = Ecdf::new(s2).unwrap();
+
+            let bridge = EcdfBridge::new(&ecdf1, &ecdf2).collect::<Vec<_>>();
+
+            assert_eq!(bridge, reference);
+        }
     }
 
     #[test]
