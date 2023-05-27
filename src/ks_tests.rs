@@ -14,8 +14,25 @@ pub enum TestError {
     ContainsNotSortableValues,
 }
 
+/// Empirical cumulative distribution function
 ///
+/// Is calculated by sorting the list of samples and represents step-like
+/// approximation to cdf of underling distribution.
+/// The value of ecdf for some `x ∈ [xᵢ, xᵢ₊₁)` is `i/N` where `N` is the total
+/// number of samples.
 ///
+/// One can iterate over the ordered samples of ecdf and their associated values
+/// as below:
+/// ```
+/// # use universal_sampler::ks_tests::{Ecdf, TestError};
+/// # fn main() -> Result<(), TestError> {
+/// let ecdf = Ecdf::new(vec![0.1, 0.0, 0.7 ,0.2])?;
+///
+/// for (ecdf_value, s) in &ecdf {
+///     println!("{s} {ecdf_value}")
+/// }
+/// # Ok(())}
+/// ```
 ///
 #[derive(Debug, Clone)]
 pub struct Ecdf<T>
@@ -29,6 +46,8 @@ impl<T> Ecdf<T>
 where
     T: PartialOrd + Copy,
 {
+    /// Create a new instance from unordered vector of samples
+    ///
     pub fn new(mut samples: Vec<T>) -> Result<Self, TestError> {
         if !all_comparable(&samples) {
             return Err(TestError::ContainsNotSortableValues);
@@ -38,10 +57,12 @@ where
     }
 }
 
+/// Iterator over ecdf
 ///
+/// Iterates over pairs (ecdf_value, sample) obtained from [Ecdf].
 ///
-///
-pub struct EcdfInterator<'a, T>
+#[derive(Debug, Clone)]
+pub struct EcdfIterator<'a, T>
 where
     T: PartialOrd + Copy,
 {
@@ -50,7 +71,7 @@ where
     n: usize,
 }
 
-impl<'a, T> EcdfInterator<'a, T>
+impl<'a, T> EcdfIterator<'a, T>
 where
     T: PartialOrd + Copy,
 {
@@ -63,7 +84,7 @@ where
     }
 }
 
-impl<'a, T> Iterator for EcdfInterator<'a, T>
+impl<'a, T> Iterator for EcdfIterator<'a, T>
 where
     T: PartialOrd + Copy,
 {
@@ -83,7 +104,7 @@ where
     T: PartialOrd + Copy,
 {
     type Item = (f64, T);
-    type IntoIter = EcdfInterator<'a, T>;
+    type IntoIter = EcdfIterator<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
@@ -100,32 +121,6 @@ where
     T: PartialOrd,
 {
     return grid.windows(2).all(|x| x[0].partial_cmp(&x[1]).is_some());
-}
-
-///
-/// Compute the value of Kolmogorov-Smirnov one-sample test statistic
-///
-/// # Panics
-/// If `samples` contain any pair of non -comparable values (e.g. contains a NaN for floats)
-///
-fn ks1_compute_statistic<T>(cdf: impl Fn(&T) -> f64, samples: Vec<T>) -> f64
-where
-    T: PartialOrd + Copy,
-{
-    let mut samples = samples;
-    let n = samples.len() as f64;
-    let mut stat = 0.0;
-
-    samples.sort_by(|a, b| a.partial_cmp(b).expect("Failed comparison"));
-
-    for (i, s) in samples.iter().enumerate() {
-        let ecdf = (i + 1) as f64 / n;
-        let new_stat = (cdf(s) - ecdf).abs();
-        if new_stat > stat {
-            stat = new_stat;
-        }
-    }
-    stat
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -194,30 +189,23 @@ where
     T: PartialOrd + Copy,
 {
     let n = samples.len();
-    if !all_comparable(&samples) {
-        return Err(TestError::ContainsNotSortableValues);
+    let ecdf = Ecdf::new(samples)?;
+
+    let mut stat = 0.0;
+
+    for (ecdf_value, v) in &ecdf {
+        let new_stat = (cdf(&v) - ecdf_value).abs();
+        if new_stat > stat {
+            stat = new_stat;
+        }
     }
-    let stat = ks1_compute_statistic(cdf, samples);
+
     Ok(KSResult::new(stat, n))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_ks1_statistic() {
-        let samples = [0.3, 0.2, 0.25, 0.1, 0.9, 0.6];
-        let res = ks1_compute_statistic(|x| *x, samples.into());
-        assert_eq!(4.0 / 6.0 - 0.3, res);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_ks1_noncomparable() {
-        let samples = [0.3, 0.2, 0.25, 0.1, 0.9, f64::NAN];
-        let _ = ks1_compute_statistic(|x| *x, samples.into());
-    }
 
     #[test]
     fn test_ks1_test() {
