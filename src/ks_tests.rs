@@ -130,14 +130,17 @@ where
     return grid.windows(2).all(|x| x[0].partial_cmp(&x[1]).is_some());
 }
 
+///
+/// Result of a statistical test
+///
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct KSResult {
+pub struct TestResult {
     stat: f64,
     p: f64,
     n: f64,
 }
 
-impl KSResult {
+impl TestResult {
     /// Compute complement of Kolmogorov-Smirnov Cumulative Distribution Function
     ///
     /// Computes: `Q(z) = 1 - CDF(z)`
@@ -168,30 +171,112 @@ impl KSResult {
     ///
     /// Create a new instance of the KS test result
     ///
-    /// #Args
+    /// # Arguments
     /// - `stat` - Value of the test statistic
     /// - `n` - effective sample size
     ///
-    fn new(stat: f64, n: f64) -> Self {
+    fn new_ks(stat: f64, n: f64) -> Self {
         let sqrt_n = f64::sqrt(n);
         let arg = sqrt_n + 0.12 + 0.11 / sqrt_n;
         let p = Self::complement_ks_cdf(arg * stat);
         Self { stat, n, p }
     }
 
+    ///
+    /// Create a new instance of the result of Kuiper test result
+    ///
+    /// # Arguments
+    /// - `stat` - Value of the test statistic
+    /// - `n` - effective sample size
+    ///
+    fn new_kuiper(stat: f64, n: f64) -> Self {
+        let z = n.sqrt() * stat;
+        let mut p = 0.0;
+
+        // In case the z parameter is very small the sum may become unstable.
+        // Set p to 1.0 in that case (which is a decent approximation)
+        if z < KuiperTerms::Z_MIN {
+            return Self { stat, n, p: 1.0 };
+        }
+
+        // Limit the maximum number of terms to 200
+        for term in KuiperTerms::new(z, n).take(200) {
+            let p_old = p;
+            p = term + p;
+            if f64::abs(p / p_old - 1.0) < 1e-7 {
+                break;
+            }
+        }
+        Self { stat, n, p }
+    }
+
     /// Get the p-value of the test
     ///
     /// Probability of observing the data under the assumption that null hypothesis holds
-    /// In this case probability that that
+    ///
     pub fn p_value(&self) -> f64 {
         self.p
     }
 }
 
 ///
+/// Iterator over the terms of Kuiper asymptotic formula for distribution of the test statistic.
+///
+/// The series is derived in the original paper (Kuiper 1960) and its sum should give
+/// the complement of cumulative distribution function for large sample sizes.
+///
+/// However for the small threshold parameter z the summation can become unstable, thus we
+/// set the limit for the z for which the terms can be evaluated.
+///
+/// N.H. Kuiper (1960), Tests Concerning Random Points on a Circle, Mathematical Statistics.
+///
+struct KuiperTerms {
+    z: f64,
+    n: f64,
+    i: usize,
+}
+
+impl KuiperTerms {
+    /// Stability threshold, below the summation may become unstable
+    pub const Z_MIN: f64 = 0.1;
+
+    /// Create new sequence of Kuiper terms
+    ///
+    /// # Arguments
+    /// - `z` : value of the threshold parameter P( √n * V > z) where `V` is the Kuiper statistic.
+    /// - `n` : effective population of the sample
+    ///
+    /// # Panics
+    /// If `z <= Self::Z_MIN` or `n` is not positive.
+    ///
+    fn new(z: f64, n: f64) -> Self {
+        if z <= Self::Z_MIN {
+            panic!("Value of the test statistic is too small {z} for the series to converge");
+        } else if n <= 0.0 {
+            panic!("Effective population {n} must be +ve value");
+        }
+        Self { z, n, i: 0 }
+    }
+}
+
+impl Iterator for KuiperTerms {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.i += 1;
+        let i = self.i as f64;
+        let zi_sq = (self.z * i).powi(2);
+        let exp_term = f64::exp(-2. * zi_sq);
+        let factor = 8.0 * self.z / (3. * self.n.sqrt());
+        let term = (2. * (4. * zi_sq - 1.) + factor * i.powi(2) * (4. * zi_sq - 3.)) * exp_term;
+        Some(term)
+    }
+}
+
+///
 /// Perform one sample Kolmogorov-Smirnov statistical test
 ///
-pub fn ks1_test<T>(cdf: impl Fn(&T) -> f64, samples: Vec<T>) -> Result<KSResult, TestError>
+pub fn ks1_test<T>(cdf: impl Fn(&T) -> f64, samples: Vec<T>) -> Result<TestResult, TestError>
 where
     T: PartialOrd + Copy,
 {
@@ -207,7 +292,7 @@ where
         }
     }
 
-    Ok(KSResult::new(stat, n as f64))
+    Ok(TestResult::new_ks(stat, n as f64))
 }
 
 ///
@@ -325,7 +410,7 @@ where
 ///
 /// Preform 2-sample Kolmogorov-Smirnov test
 ///
-pub fn ks2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<KSResult, TestError>
+pub fn ks2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
 where
     T: PartialOrd + Copy,
 {
@@ -341,7 +426,35 @@ where
         .max_by(|a, b| a.partial_cmp(b).expect("PartialOrd comparison failed"))
         .expect("Empty iterator?!");
 
-    Ok(KSResult::new(stat, n1 * n2 / (n1 + n2)))
+    Ok(TestResult::new_ks(stat, n1 * n2 / (n1 + n2)))
+}
+
+///
+/// Preform 2-sample Kuiper's test
+///
+pub fn kuiper2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
+where
+    T: PartialOrd + Copy,
+{
+    let n1 = sample1.len() as f64;
+    let n2 = sample2.len() as f64;
+
+    let ecdf1 = Ecdf::new(sample1)?;
+    let ecdf2 = Ecdf::new(sample2)?;
+
+    let mut minimum = 0.0;
+    let mut maximum = 0.0;
+
+    for v in EcdfBridge::new(&ecdf1, &ecdf2) {
+        if v < minimum {
+            minimum = v
+        } else if v > maximum {
+            maximum = v
+        }
+    }
+    let stat = minimum.abs() + maximum.abs();
+
+    Ok(TestResult::new_kuiper(stat, n1 * n2 / (n1 + n2)))
 }
 
 #[cfg(test)]
@@ -368,7 +481,7 @@ mod tests {
     #[test]
     fn test_ks1_test() {
         let samples = [0.3, 0.2, 0.25, 0.1, 0.9, 0.6];
-        let lhs = KSResult::new(4.0 / 6.0 - 0.3, 6.0);
+        let lhs = TestResult::new_ks(4.0 / 6.0 - 0.3, 6.0);
         let rhs = ks1_test(|x| *x, samples.into()).unwrap();
         assert_eq!(lhs, rhs);
     }
@@ -388,7 +501,7 @@ mod tests {
         let samples2 = [0.1, 0.8, 0.34, 0.09, 0.12, 0.81];
 
         let rhs = ks2_test(samples1.into(), samples2.into()).unwrap();
-        let lhs = KSResult::new(1.0 / 3.0, 3.0);
+        let lhs = TestResult::new_ks(1.0 / 3.0, 3.0);
         assert_eq!(lhs, rhs);
     }
 
@@ -398,7 +511,42 @@ mod tests {
         let samples2 = [2];
 
         let rhs = ks2_test(samples1.into(), samples2.into()).unwrap();
-        let lhs = KSResult::new(0.25, 0.8);
+        let lhs = TestResult::new_ks(0.25, 0.8);
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn test_kuiper() {
+        let sample1 = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let sample2 = vec![11, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let rhs = kuiper2_test(sample1, sample2).unwrap();
+        let lhs = TestResult::new_kuiper(0.1, 5.0);
+
+        println!("{rhs:#?}");
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn test_kuiper_same_sample() {
+        let sample1 = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let rhs = kuiper2_test(sample1.clone(), sample1.clone()).unwrap();
+        let lhs = TestResult::new_kuiper(0.0, 5.0);
+
+        println!("{rhs:#?}");
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn test_kuiper_2() {
+        let sample1 = vec![0.07, 0.74, 0.20, 0.55, 0.33, 0.98, 0.32, 0.36, 0.86, 0.43];
+        let sample2 = vec![0.73, 0.10, 0.49, 0.18, 0.87, 0.25, 0.80, 0.54, 0.90, 0.06];
+
+        let rhs = kuiper2_test(sample1, sample2).unwrap();
+        let lhs = TestResult::new_kuiper(0.4, 5.0);
+
+        println!("{rhs:#?}");
         assert_eq!(lhs, rhs);
     }
 
@@ -434,13 +582,17 @@ mod tests {
         ];
 
         for (x, val) in test_points {
-            approx::assert_relative_eq!(val, KSResult::complement_ks_cdf(x), max_relative = 1.0e-7);
+            approx::assert_relative_eq!(
+                val,
+                TestResult::complement_ks_cdf(x),
+                max_relative = 1.0e-7
+            );
         }
     }
 
     #[test]
     #[should_panic]
     fn test_ks_cdf_complement_invalid_range() {
-        KSResult::complement_ks_cdf(-2.0);
+        TestResult::complement_ks_cdf(-2.0);
     }
 }
