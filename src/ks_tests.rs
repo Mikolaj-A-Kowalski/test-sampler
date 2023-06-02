@@ -202,11 +202,23 @@ impl TestResult {
         // Limit the maximum number of terms to 200
         for term in KuiperTerms::new(z, n).take(200) {
             let p_old = p;
-            p = term + p;
+            p += term;
             if f64::abs(p / p_old - 1.0) < 1e-7 {
                 break;
             }
         }
+        Self { stat, n, p }
+    }
+
+    ///
+    /// Create a new instance of the result of Anderson-Darling two-sample test
+    ///
+    /// # Arguments
+    /// - `stat` - Value of the test statistic
+    /// - `n` - effective sample size
+    ///
+    fn new_ad(stat: f64, n: f64) -> Self {
+        let p = (stat - 1.0) / (1.0 - 1.55 / n) + 1.0;
         Self { stat, n, p }
     }
 
@@ -318,6 +330,7 @@ where
     delta_top: f64,
     delta_bottom: f64,
     sum: f64,
+    count: usize,
 }
 
 impl<'a, T> EcdfBridge<'a, T>
@@ -331,6 +344,7 @@ where
             delta_top: 1.0 / ecdf_top.samples.len() as f64,
             delta_bottom: 1.0 / ecdf_bottom.samples.len() as f64,
             sum: 0.0,
+            count: 0,
         }
     }
 
@@ -344,6 +358,7 @@ where
     fn advance_top(&mut self) -> f64 {
         loop {
             let v = self.top.next().unwrap();
+            self.count += 1;
             self.sum += self.delta_top;
 
             let next = self.top.peek();
@@ -365,6 +380,7 @@ where
     fn advance_bottom(&mut self) -> f64 {
         loop {
             let v = self.bottom.next().unwrap();
+            self.count += 1;
             self.sum -= self.delta_bottom;
 
             let next = self.bottom.peek();
@@ -374,6 +390,16 @@ where
             }
         }
         self.sum
+    }
+
+    /// Enumerate the samples of the bridge
+    ///
+    /// Iterates over `(i, val)` where `i` is the count of all samples. Like
+    /// [EcdfBridge] iterator skips over repeated samples, but they are included
+    /// in the count. Thus the increments of `i` may be larger than `1`.
+    ///
+    pub fn enumerate_samples(self) -> EnumeratedEcdfBridge<'a, T> {
+        EnumeratedEcdfBridge { bridge: self }
     }
 }
 
@@ -403,6 +429,34 @@ where
             (None, Some(_)) => Some(self.advance_bottom()),
             (Some(_), None) => Some(self.advance_top()),
             (None, None) => None,
+        }
+    }
+}
+
+///
+/// Returned from [EcdfBridge::enumerate_samples]
+///
+/// Wraps around [EcdfBridge] and allows to enumerate the samples, but
+/// unlike the ordinary [std::iter::Iterator::enumerate] accounts for the
+/// 'skips' (non 1 increment) due to the repeated samples.
+///
+struct EnumeratedEcdfBridge<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    bridge: EcdfBridge<'a, T>,
+}
+
+impl<'a, T> Iterator for EnumeratedEcdfBridge<'a, T>
+where
+    T: PartialOrd + Copy,
+{
+    type Item = (usize, f64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.bridge.next() {
+            Some(v) => Some((self.bridge.count - 1, v)),
+            None => None,
         }
     }
 }
@@ -455,6 +509,53 @@ where
     let stat = minimum.abs() + maximum.abs();
 
     Ok(TestResult::new_kuiper(stat, n1 * n2 / (n1 + n2)))
+}
+
+///
+/// Perform Anderson-Darling two sample test
+///
+/// Implementation is based on the (Pettitt 1976) paper. As the result can be
+/// used only for continuous distributions where the duplicate values in the
+/// samples have vanishingly small probability to occur.
+///
+/// Note that the (Pettitt 1976) seems to have slightly different behaviour
+/// from the $ A^2\_{kN} $ statistic of (Scholz 1987) if the duplicate samples
+/// are present.
+///
+/// # References
+/// - Pettitt, A. N. (1976). A Two-Sample Anderson--Darling Rank Statistic. Biometrika, 63(1),
+///   161–168. <https://doi.org/10.2307/2335097>
+/// - Scholz, F. W., & Stephens, M. A. (1987). K-Sample Anderson-Darling Tests.
+///   Journal of the American Statistical Association, 82(399), 918–924.
+///   <https://doi.org/10.2307/2288805>
+///
+///
+pub fn ad2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
+where
+    T: PartialOrd + Copy,
+{
+    let n1 = sample1.len() as f64;
+    let n2 = sample2.len() as f64;
+    let tot_n = sample1.len() + sample2.len();
+
+    let ecdf1 = Ecdf::new(sample1)?;
+    let ecdf2 = Ecdf::new(sample2)?;
+
+    let mut stat = 0.0;
+
+    for (idx, v) in EcdfBridge::new(&ecdf1, &ecdf2).enumerate_samples() {
+        let denum = (idx + 1) * (tot_n - idx - 1);
+
+        // We need to exclude last entry which will be a NaN [0./0.]
+        if denum != 0 {
+            stat += v.powi(2) / denum as f64
+        }
+    }
+
+    // Scale by the population
+    stat *= n1 * n2;
+
+    Ok(TestResult::new_ad(stat, tot_n as f64))
 }
 
 #[cfg(test)]
@@ -551,6 +652,21 @@ mod tests {
     }
 
     #[test]
+    fn test_ad() {
+        let sample1 = vec![0.07, 0.74, 0.20, 0.55, 0.33, 0.98, 0.32, 0.36, 0.86, 0.43];
+        let sample2 = vec![0.73, 0.10, 0.49, 0.18, 0.87, 0.25, 0.80, 0.54, 0.90, 0.06];
+
+        let rhs = ad2_test(sample1, sample2).unwrap();
+
+        // Reference value taken from SciPy
+        // (Internal `_anderson_ksamp_right` was used to get statistic before normalisation)
+        let lhs = TestResult::new_ad(0.3634446006350032, 20.0);
+
+        println!("{rhs:#?}");
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
     fn test_ecdf_bridge() {
         let cases = [
             (vec![1, 2, 2, 3], vec![2], vec![0.25, -0.25, 0.0]),
@@ -568,6 +684,24 @@ mod tests {
 
             assert_eq!(bridge, reference);
         }
+    }
+
+    #[test]
+    fn test_ecdf_enumerated_bridge() {
+        let sample1 = vec![1, 2, 2, 3, 3];
+        let sample2 = vec![0, 2, 4];
+
+        let ecdf1 = Ecdf::new(sample1).unwrap();
+        let ecdf2 = Ecdf::new(sample2).unwrap();
+
+        let ref_count: Vec<usize> = vec![0, 1, 4, 6, 7];
+
+        let count = EcdfBridge::new(&ecdf1, &ecdf2)
+            .enumerate_samples()
+            .map(|(i, _)| i)
+            .collect::<Vec<usize>>();
+
+        assert_eq!(ref_count, count);
     }
 
     #[test]
