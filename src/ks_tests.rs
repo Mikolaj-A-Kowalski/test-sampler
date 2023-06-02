@@ -135,7 +135,7 @@ where
 ///
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TestResult {
-    stat: f64,
+    pub stat: f64,
     p: f64,
     n: f64,
 }
@@ -217,8 +217,21 @@ impl TestResult {
     /// - `stat` - Value of the test statistic
     /// - `n` - effective sample size
     ///
+    /// We use the approximation of the CDF by (Lewis 1961)
+    ///
+    /// $$ F(z) = 1 - \sqrt{ 1 - 4 \exp(-(z+1)) } $$
+    ///
+    /// Or if the value under square root is negative: $F(z)= 1$
+    /// This approximation should be overly conservative for the small samples.
+    ///
     fn new_ad(stat: f64, n: f64) -> Self {
-        let p = (stat - 1.0) / (1.0 - 1.55 / n) + 1.0;
+        let arg = 1.0 - 4.0 * f64::exp(-(stat + 1.0));
+
+        let p = if arg > 0.0 {
+            1.0 - arg.sqrt()
+        } else {
+            1.0
+        };
         Self { stat, n, p }
     }
 
@@ -522,13 +535,23 @@ where
 /// from the $ A^2\_{kN} $ statistic of (Scholz 1987) if the duplicate samples
 /// are present.
 ///
+/// The p-value of the test is obtained from the large sample approximation to
+/// the distribution of the Anderson-Darling statistic provided by (Lewis 1961):
+///
+/// $$ F(z) = 1 - \sqrt{ 1 - 4 \exp(-(z+1)) } $$
+///
+/// Or if the value under square root is negative: $F(z)= 1$
+/// This approximation should be conservative for smaller sample sizes (true
+/// type I error frequency will be smaller than expected)
+///
 /// # References
 /// - Pettitt, A. N. (1976). A Two-Sample Anderson--Darling Rank Statistic. Biometrika, 63(1),
 ///   161–168. <https://doi.org/10.2307/2335097>
 /// - Scholz, F. W., & Stephens, M. A. (1987). K-Sample Anderson-Darling Tests.
 ///   Journal of the American Statistical Association, 82(399), 918–924.
 ///   <https://doi.org/10.2307/2288805>
-///
+/// - Lewis, P. A. W. (1961). Distribution of the Anderson-Darling Statistic.
+///   Ann. Math. Statist., 32(4), 1118-1124.
 ///
 pub fn ad2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
 where
