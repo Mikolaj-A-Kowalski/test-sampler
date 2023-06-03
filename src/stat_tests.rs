@@ -1,16 +1,54 @@
-//! Provides One- and Two-Sample Kolmogorov-Smirnov test implementation
+//! Collection of statistical tests
+//!
+//! Provides a number of statistical tests that can be used to compare samples:
+//!  - Kolmogorov-Smirnov test
+//!  - Kuiper's test
+//!  - Anderson-Darling test
+//!
+//! Each of this tests, checks a null hypothesis that both samples are drawn
+//! from the same distribution. After the test is performed we can compare the
+//! p-value against some error threshold e.g. `5%` :
+//! ```
+//! # use test_sampler::stat_tests::*;
+//! # use rand::prelude::*;
+//! # fn main() -> Result<(), TestError> {
+//! let s1 : Vec<f64> = (0..100).map(|_| rand::thread_rng().gen()).collect();
+//! let s2 : Vec<f64> = (0..70).map(|_| rand::thread_rng().gen()).collect();
+//!
+//! let test_result = ks2_test(s1, s2)?;
+//!
+//! // For the test to reject null hypothesis p_value must be below the threshold
+//! assert!(test_result.p_value() > 0.05);
+//!
+//! # Ok(())}
+//! ```
+//! This basically tells that the value of the test statistic is within `95%`
+//! probability range for the distribution which assumes the null hypothesis that
+//! the samples are from the same distribution. So if we were to run the same
+//! test multiple times, we would find that in `95%` cases the test would not
+//! reject the null hypothesis and `5%` of times it would wrongly reject it,
+//! creating so-called *Type 1* error.
+//!
+//! However, what we are interested in is the frequency of the *Type 2* errors.
+//! They happen when the test does not reject the null hypothesis despite samples
+//! being drawn from different distributions. However, there is no analytical
+//! formula for this, sine the error frequency depends on the difference between
+//! the distributions and size of the samples. The parameter that describes the
+//! frequency of *Type 2* errors is called *Power* of the test and has to be
+//! established by numerical experiments.
 //!
 use std::f64::consts::PI;
 use std::iter::{Iterator, Peekable};
 use thiserror::Error;
 
 ///
-/// Error that can be raise by a statistical test
+/// Error that can be raised by a statistical test
+///
 #[derive(Debug, Error)]
 pub enum TestError {
     /// Case when a type to test supports only a partial order and some of the entries are not
     /// present in the order sequence (e.g. NaN in floats)
-    #[error("Collection contains values that cannot be placed in an order sequence (e.g. NaNfor floats)")]
+    #[error("Collection contains values that cannot be placed in an order sequence (e.g. NaN for floats)")]
     ContainsNotSortableValues,
 }
 
@@ -24,7 +62,7 @@ pub enum TestError {
 /// One can iterate over the ordered samples of ecdf and their associated values
 /// as below:
 /// ```
-/// # use test_sampler::ks_tests::{Ecdf, TestError};
+/// # use test_sampler::stat_tests::{Ecdf, TestError};
 /// # fn main() -> Result<(), TestError> {
 /// let ecdf = Ecdf::new(vec![0.1, 0.0, 0.7 ,0.2])?;
 ///
@@ -152,12 +190,18 @@ fn anderson_darling_cdf(z: f64) -> f64 {
     }
 }
 
+/// Represents a result of a statistical test
 ///
-/// Result of a statistical test
+/// This struct is returned by a statistical tests and contains:
+/// - value of the test statistic
+/// - p_value for the statistic and the provided effective population size
+///
+/// At the moment test results does not store information about the test
+/// in which it was produced.
 ///
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TestResult {
-    pub stat: f64,
+    stat: f64,
     p: f64,
     n: f64,
 }
@@ -258,6 +302,12 @@ impl TestResult {
     pub fn p_value(&self) -> f64 {
         self.p
     }
+
+    /// Get the value of the test statistic
+    ///
+    pub fn stat(&self) -> f64 {
+        self.stat
+    }
 }
 
 ///
@@ -268,8 +318,6 @@ impl TestResult {
 ///
 /// However for the small threshold parameter z the summation can become unstable, thus we
 /// set the limit for the z for which the terms can be evaluated.
-///
-/// N.H. Kuiper (1960), Tests Concerning Random Points on a Circle, Mathematical Statistics.
 ///
 struct KuiperTerms {
     z: f64,
@@ -312,28 +360,6 @@ impl Iterator for KuiperTerms {
         let term = (2. * (4. * zi_sq - 1.) + factor * i.powi(2) * (4. * zi_sq - 3.)) * exp_term;
         Some(term)
     }
-}
-
-///
-/// Perform one sample Kolmogorov-Smirnov statistical test
-///
-pub fn ks1_test<T>(cdf: impl Fn(&T) -> f64, samples: Vec<T>) -> Result<TestResult, TestError>
-where
-    T: PartialOrd + Copy,
-{
-    let n = samples.len();
-    let ecdf = Ecdf::new(samples)?;
-
-    let mut stat = 0.0;
-
-    for (ecdf_value, v) in &ecdf {
-        let new_stat = (cdf(&v) - ecdf_value).abs();
-        if new_stat > stat {
-            stat = new_stat;
-        }
-    }
-
-    Ok(TestResult::new_ks(stat, n as f64))
 }
 
 ///
@@ -491,7 +517,54 @@ where
 }
 
 ///
-/// Preform 2-sample Kolmogorov-Smirnov test
+/// Perform one sample Kolmogorov-Smirnov statistical test
+///
+/// Evaluates the Kolmogorov-Smirnov statistic:
+///
+/// $$ KS = \max |F_1(x) - F_{ref}(x)| $$
+///
+/// Where $F_1$ is the empirical cumulative distribution function of the sample
+/// and the $F_{ref}$ the reference distribution provided by the user as an argument.
+/// The p-value is calculated from the statistic as prescribed in (Press 2007).
+///
+/// # References
+/// - Press W. H. , Teukolsky S. A., Vetterling W. T., Flannery B. P. (2007).
+///   Numerical Recipes 3rd Edition: The Art of Scientific Computing (3rd. ed.).
+///   Cambridge University Press, USA.
+///
+pub fn ks1_test<T>(cdf: impl Fn(&T) -> f64, samples: Vec<T>) -> Result<TestResult, TestError>
+where
+    T: PartialOrd + Copy,
+{
+    let n = samples.len();
+    let ecdf = Ecdf::new(samples)?;
+
+    let mut stat = 0.0;
+
+    for (ecdf_value, v) in &ecdf {
+        let new_stat = (cdf(&v) - ecdf_value).abs();
+        if new_stat > stat {
+            stat = new_stat;
+        }
+    }
+
+    Ok(TestResult::new_ks(stat, n as f64))
+}
+
+///
+/// Preform two sample Kolmogorov-Smirnov test
+///
+/// Evaluates the Kolmogorov-Smirnov statistic:
+///
+/// $$ KS = \max |F_1(x) - F_2(x)| $$
+///
+/// Where both $F_1$ and $F_2$ are empirical cumulative distribution functions.
+/// The p-value is calculated from the statistic as prescribed in (Press 2007)
+///
+/// # References
+/// - Press W. H. , Teukolsky S. A., Vetterling W. T., Flannery B. P. (2007).
+///   Numerical Recipes 3rd Edition: The Art of Scientific Computing (3rd. ed.).
+///   Cambridge University Press, USA.
 ///
 pub fn ks2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
 where
@@ -514,6 +587,25 @@ where
 
 ///
 /// Preform 2-sample Kuiper's test
+///
+/// Kuiper's test is the modification of the Kolmogorov-Smirnov test. Instead
+/// of searching for maximum deviation between empirical cdfs, it uses the
+/// following as the test statistic:
+/// $$ K = \max{[F_1(x) - F_2(x)]} + \min{[F_1(x) - F_2(x)]} $$
+///
+/// Where $F_i(x)$ is of course empirical cdf for the i-th sample.
+///
+/// The particularly interesting feature of the Kuiper's test is, that if the
+/// support is a circle, the test statistic is invariant under rotation.
+/// Thus it is used particularly often for angular distributions.
+/// It is also said to be more sensitive 'at the tails' of the distribution than
+/// KS test.
+///
+/// # References
+/// - Kuiper, N.H. (1960). Tests concerning random points on a circle.
+///   Indagationes Mathematicae (Proceedings), 63, 38-47.
+///   <https://doi.org/10.1016/S1385-7258(60)50006-0>
+///
 ///
 pub fn kuiper2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
 where
@@ -543,6 +635,9 @@ where
 ///
 /// Perform Anderson-Darling two sample test
 ///
+/// Should only be used with continuous distributions and large samples!
+/// (More than few 100s).
+///
 /// Implementation is based on the (Pettitt 1976) paper. As the result can be
 /// used only for continuous distributions where the duplicate values in the
 /// samples have vanishingly small probability to occur.
@@ -552,7 +647,9 @@ where
 /// are present.
 ///
 /// The p-value of the test is obtained using the simplified expression of
-/// (Marsaglia 2004) [see the C code distributed with the paper].
+/// (Marsaglia 2004) [see the C code distributed with the paper]. The p-value
+/// calculation uses large-sample approximation and may overestimate the
+/// distribution for smaller sample sizes.
 ///
 /// # References
 /// - Pettitt, A. N. (1976). A Two-Sample Anderson--Darling Rank Statistic. Biometrika, 63(1),
@@ -562,7 +659,7 @@ where
 ///   <https://doi.org/10.2307/2288805>
 /// - Marsaglia, G., & Marsaglia, J. (2004). Evaluating the Anderson-Darling
 ///   Distribution. Journal of Statistical Software, 9(2), 1–5.
-///   https://doi.org/10.18637/jss.v009.i02
+///   <https://doi.org/10.18637/jss.v009.i02>
 ///
 pub fn ad2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
 where

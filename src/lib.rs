@@ -12,7 +12,7 @@ use is_sorted::IsSorted;
 use std::ops::Range;
 use thiserror::Error;
 
-pub mod ks_tests;
+pub mod stat_tests;
 
 /// Error raised when the setup of a sampling distribution has failed
 ///
@@ -395,7 +395,7 @@ mod tests {
             .map(|_| rng.sample(&dist))
             .collect::<Vec<_>>();
 
-        let ks_res = ks_tests::ks1_test(
+        let ks_res = stat_tests::ks1_test(
             |x| {
                 let idx = search_sorted(&support, *x).unwrap();
                 let x0 = support[idx];
@@ -446,7 +446,7 @@ mod tests {
             .map(|_| rng.sample(&dist))
             .collect::<Vec<_>>();
 
-        let ks_res = ks_tests::ks1_test(|x| 3.0 * x * x - 2.0 * x * x * x, samples).unwrap();
+        let ks_res = stat_tests::ks1_test(|x| 3.0 * x * x - 2.0 * x * x * x, samples).unwrap();
         // Print the test results in case of a failure
         println!("{:?}", ks_res);
         assert!(ks_res.p_value() > 0.01)
