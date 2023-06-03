@@ -108,7 +108,7 @@ pub enum SetupError {
 /// To support better approximation of different pdfs, the grid is not
 /// equal-spaced in general. Hence binary search is needed to find correct bin.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HistogramDistribution {
     x: Vec<f64>,
     pdf: Vec<f64>,
@@ -305,6 +305,7 @@ pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
 /// # }
 /// ```
 ///
+#[derive(Debug, Clone)]
 pub struct FunctionSampler<T: Fn(f64) -> f64> {
     function: T,
     hist: HistogramDistribution,

@@ -1,7 +1,13 @@
 [package]
 name = "test-sampler"
 version = "0.1.0"
+authors = ["Mikolaj-A-Kowalski"]
 edition = "2021"
+description = "Tools for statistical unit testing of sampling procedures"
+repository = "https://github.com/Mikolaj-A-Kowalski/test-sampler"
+license = "MIT"
+keywords = ["monte-carlo", "testing", "physics", "nuclear"]
+categories = ["science", "development-tools::testing"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
