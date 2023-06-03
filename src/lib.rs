@@ -186,7 +186,7 @@ where
 /// Creates linearly spaced grid between `start` and `end` of size `n`
 ///
 /// ```
-/// # use universal_sampler::linspace;
+/// # use test_sampler::linspace;
 /// assert_eq!(vec![1.0, 2.0, 3.0], linspace(1.0, 3.0, 3));
 /// assert_eq!(vec![3.0, 2.0, 1.0], linspace(3.0, 1.0, 3));
 /// assert_eq!(vec![3.0, 3.0, 3.0], linspace(3.0, 3.0, 3));
@@ -235,10 +235,10 @@ pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
 /// The distribution is integrated with [rand] package and can be used to construct
 /// a sampling iterator as follows:
 /// ```
-/// # use universal_sampler::FunctionSampler;
+/// # use test_sampler::FunctionSampler;
 /// use rand::{self, Rng};
 ///
-/// # fn main() -> Result<(), universal_sampler::SetupError> {
+/// # fn main() -> Result<(), test_sampler::SetupError> {
 /// let dist = FunctionSampler::new(|x| -x*x + x, 0.0..1.0, 30)?;
 /// let samples = rand::thread_rng().sample_iter(&dist).take(10);
 /// # Ok(())

@@ -24,7 +24,7 @@ pub enum TestError {
 /// One can iterate over the ordered samples of ecdf and their associated values
 /// as below:
 /// ```
-/// # use universal_sampler::ks_tests::{Ecdf, TestError};
+/// # use test_sampler::ks_tests::{Ecdf, TestError};
 /// # fn main() -> Result<(), TestError> {
 /// let ecdf = Ecdf::new(vec![0.1, 0.0, 0.7 ,0.2])?;
 ///
