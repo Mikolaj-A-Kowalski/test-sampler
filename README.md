@@ -1,4 +1,5 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![build](https://github.com/Mikolaj-A-Kowalski/test-sampler/actions/workflows/build.yml/badge.svg)](https://github.com/Mikolaj-A-Kowalski/test-sampler/actions/workflows/build.yml)
 
 # test-sampler: Unit Test Tool for Sampling Algorithms
 
@@ -8,7 +9,7 @@ In particular, when developing Monte Carlo particle transport codes, one needs
 to write procedures to sample a large number of complex distributions that
 describe different physical interactions (various types of scattering, fissions etc.).
 The models are usually well described by differential cross-sections
-$ \frac{d\sigma}{dE'd\Omega}(E) $ for which explicit expressions exist.
+$`\frac{d\sigma}{dE'd\Omega}(E)`$ for which explicit expressions exist.
 However, in practice getting the normalisation to convert cross-section
 into the probability density function (pdf) may require tricky numerical integration.
 Thus, in short, getting the shape of pdf is often easy, getting the pdf or cumulative
