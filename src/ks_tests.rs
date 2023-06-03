@@ -131,6 +131,28 @@ where
 }
 
 ///
+/// Compute the approximate value of the CDF of Anderson-Darling distribution
+///
+/// Uses the approximate expression from the (Marsaglia 2004) paper. Taken
+/// from the C code
+///
+fn anderson_darling_cdf(z: f64) -> f64 {
+    if z == 0.0 {
+        0.0
+    } else if z < 2.0 {
+        f64::exp(-1.2337141 / z) / f64::sqrt(z)
+            * (2.00012
+                + (0.247105 - (0.0649821 - (0.0347962 - (0.011672 - 0.00168691 * z) * z) * z) * z)
+                    * z)
+    } else {
+        f64::exp(-f64::exp(
+            1.0776
+                - (2.30695 - (0.43424 - (0.082433 - (0.008056 - 0.0003146 * z) * z) * z) * z) * z,
+        ))
+    }
+}
+
+///
 /// Result of a statistical test
 ///
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -225,13 +247,7 @@ impl TestResult {
     /// This approximation should be overly conservative for the small samples.
     ///
     fn new_ad(stat: f64, n: f64) -> Self {
-        let arg = 1.0 - 4.0 * f64::exp(-(stat + 1.0));
-
-        let p = if arg > 0.0 {
-            1.0 - arg.sqrt()
-        } else {
-            1.0
-        };
+        let p = 1.0 - anderson_darling_cdf(stat);
         Self { stat, n, p }
     }
 
@@ -535,14 +551,8 @@ where
 /// from the $ A^2\_{kN} $ statistic of (Scholz 1987) if the duplicate samples
 /// are present.
 ///
-/// The p-value of the test is obtained from the large sample approximation to
-/// the distribution of the Anderson-Darling statistic provided by (Lewis 1961):
-///
-/// $$ F(z) = 1 - \sqrt{ 1 - 4 \exp(-(z+1)) } $$
-///
-/// Or if the value under square root is negative: $F(z)= 1$
-/// This approximation should be conservative for smaller sample sizes (true
-/// type I error frequency will be smaller than expected)
+/// The p-value of the test is obtained using the simplified expression of
+/// (Marsaglia 2004) [see the C code distributed with the paper].
 ///
 /// # References
 /// - Pettitt, A. N. (1976). A Two-Sample Anderson--Darling Rank Statistic. Biometrika, 63(1),
@@ -550,8 +560,9 @@ where
 /// - Scholz, F. W., & Stephens, M. A. (1987). K-Sample Anderson-Darling Tests.
 ///   Journal of the American Statistical Association, 82(399), 918–924.
 ///   <https://doi.org/10.2307/2288805>
-/// - Lewis, P. A. W. (1961). Distribution of the Anderson-Darling Statistic.
-///   Ann. Math. Statist., 32(4), 1118-1124.
+/// - Marsaglia, G., & Marsaglia, J. (2004). Evaluating the Anderson-Darling
+///   Distribution. Journal of Statistical Software, 9(2), 1–5.
+///   https://doi.org/10.18637/jss.v009.i02
 ///
 pub fn ad2_test<T>(sample1: Vec<T>, sample2: Vec<T>) -> Result<TestResult, TestError>
 where
@@ -584,6 +595,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ad_cdf() {
+        let val = vec![0.0, 0.3, 2.0, 3.0];
+        let ref_vals = vec![0.0, 0.06183989, 0.90816425, 0.97263617];
+
+        let rhs = val
+            .iter()
+            .map(|x| anderson_darling_cdf(*x))
+            .collect::<Vec<f64>>();
+
+        for (l, r) in std::iter::zip(ref_vals, rhs) {
+            approx::assert_relative_eq!(l, r, max_relative = 1.0e-6);
+        }
+    }
 
     #[test]
     fn test_ecdf() {
