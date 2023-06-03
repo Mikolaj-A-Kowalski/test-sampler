@@ -1,5 +1,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![build](https://github.com/Mikolaj-A-Kowalski/test-sampler/actions/workflows/build.yml/badge.svg)](https://github.com/Mikolaj-A-Kowalski/test-sampler/actions/workflows/build.yml)
+![crates.io](https://img.shields.io/crates/v/test-sampler.svg)
+
 
 # test-sampler: Unit Test Tool for Sampling Algorithms
 
