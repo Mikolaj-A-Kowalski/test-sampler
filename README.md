@@ -25,3 +25,13 @@ Thus one can use the `universal sampler` to (inefficiently) generate reference
 set of samples from a shape function and compare them against the 'production'
 algorithm.
 
+# Compile docs
+The package is using [Katex](https://katex.org/) to render equations as the
+result to compile documentation locally extra flags need to be provided to `cargo`:
+```bash
+export RUSTDOCFLAGS="--html-in-header <path-to-repo>/katex-header.html"
+```
+To compile docs from the root of the repositry run::
+```bash
+RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --no-deps
+```

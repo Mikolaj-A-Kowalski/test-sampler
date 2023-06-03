@@ -1,11 +1,71 @@
-//! Sample 1D distributions given functional shape
+//! Contains tools to perform unit testing of sampling algorithms.
 //!
-//! This crates implements a struct that allows drawing samples from any
-//! smooth probability density function shape.
+//! It has been developed particularly to help with the development of Monte
+//! Carlo particle transport codes, where a large number of various sampling
+//! procedures is required to stochastically simulate physical interactions of
+//! radiation with matter.
 //!
-//! It is intended to be used as a reference distribution for 2-sample
-//! Kolmogorov-Smirnov test to test correctness of more efficient sampling
-//! algorithms.
+//! In general models are described with differential cross-sections
+//! $\frac{d\sigma}{dE'd\Omega}(E)$, which provide with the shape of probability
+//! density function. In general normalisation is difficult to get without
+//! complex integration.
+//!
+//! For that reason this package is composed of two parts:
+//! - [FunctionSampler] which allows to (inefficiently) draw samples from
+//!   a non-normalised pdf shape function
+//! - Suite of statistical tests [crate::stat_tests], which allow to verify that
+//!   samples from a tested distribution match the one generated with [FunctionSampler]
+//!
+//! Thus to verify sampling one needs to:
+//! - Verify shape function with deterministic unit tests
+//! - Compare sampling procedure against reference values from [FunctionSampler]
+//!   using statistical tests
+//!
+//! Note that as a result of statistical uncertainty and variable *power* of
+//! statistical tests for different defects and sample populations the sampling
+//! unit tests cannot ever provide with the same level of certainty as the
+//! deterministic one. Also the appropriate number of samples and type(s) of
+//! the test(s) will depend on a particular application.
+//!
+//! # Example
+//!
+//! Let us verify simple inversion sampling of $f(x) = x$ on $\[0;1\]$,
+//! for which we can generate samples with $\hat{f} = \sqrt{r}$ where $r$ is
+//! uniformly distributed random number.
+//!
+//! ```
+//! use test_sampler::FunctionSampler;
+//! use rand::prelude::*;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!
+//! // Seed rngs
+//! let mut rng1 = StdRng::seed_from_u64(87674);
+//! let mut rng2 = StdRng::seed_from_u64(87674);
+//!
+//! // Draw reference samples from the FunctionSampler
+//! let support = 0.0..1.0;
+//! let num_bins = 30;
+//!
+//! let reference_dist = FunctionSampler::new(|x| x, support, num_bins)?;
+//! let s_ref : Vec<f64> = rng1.sample_iter(&reference_dist).take(100).collect();
+//!
+//! // Samples to test
+//! let s : Vec<f64> = (0..100).map(|_| rng2.gen()).map(|r: f64| r.sqrt()).collect();
+//!
+//! // Perform tests
+//! // Vectors of samples will be moved inside the procedures
+//! // It is necessary since the samples must be sorted (and mutated)
+//! let ks_res = test_sampler::stat_tests::ks2_test(s_ref.clone(), s.clone())?;
+//! let kup_res = test_sampler::stat_tests::kuiper2_test(s_ref.clone(), s.clone())?;
+//! let ad_res = test_sampler::stat_tests::ad2_test(s_ref, s)?;
+//!
+//! // Check test results
+//! assert!(ks_res.p_value() > 0.05);
+//! assert!(kup_res.p_value() > 0.05);
+//! assert!(ad_res.p_value() > 0.05);
+//!
+//! # Ok(()) }
+//! ```
 //!
 use argmin::core::CostFunction;
 use is_sorted::IsSorted;
@@ -206,8 +266,8 @@ pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
 
 /// Distribution described by a non-negative shape function on an interval
 ///
-/// Allows sampling from a generic distribution described by some shape function `f`.
-/// The function does not need to be normalised i.e. `∫f(s)ds ≠ 1.0` in general
+/// Allows sampling from a generic distribution described by some shape function $f(x)$.
+/// The function does not need to be normalised i.e. $ \int f(s) d(s) \ne 1 $ in general
 ///
 /// It is intended to be used as a reference distribution for verification of
 /// more efficient sampling algorithms.
@@ -215,20 +275,20 @@ pub fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
 /// # Sampling procedure
 ///
 /// To generate the samples a relatively expensive setup step is required. The user
-/// provides an interval `[x₀, x₁]` which is a support of the shape function `f`.
+/// provides an interval $[x_0, x_1]$ which is a support of the shape function $f(x)$.
 /// The support is then subdivided into number of bins. In each a local maximum
 /// is found by numerical means. This allows to create a histogram approximation
 /// of the probability distribution, that 'tops' the actual distribution. Hence,
 /// we may draw samples from the histogram and use rejection scheme to obtain
-/// the distribution described by `f`.
+/// the distribution described by $f(x)$.
 ///
 /// Since the numerical maximisation is associated with some tolerance, a safety
 /// factor of 5% is applied on the local maxima to ensure that the supremum criterion
 /// required for rejection sampling is met.
 ///
-/// Note that for very sharp functions (large `df/dx`) the safety factor may be
-/// insufficient. Also a general check if `f(x) ≥ 0 ∀ x∈[x₀, x₁]` is met is
-/// not feasible. Hence sampling may **panic** if either of the conditions occurs.
+/// Note that for very sharp functions (large $\frac{df}{dx} $) the safety factor may be
+/// insufficient. Also a general check if  $f(x) \ge 0 ~\forall~ x \in [x_0; x_1]$
+/// is met is not feasible. Hence sampling may **panic** if either of the conditions occurs.
 ///
 /// # Usage
 ///
